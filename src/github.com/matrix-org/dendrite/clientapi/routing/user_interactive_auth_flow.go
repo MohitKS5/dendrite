@@ -48,7 +48,7 @@ type authDict struct {
 
 // a generic flowRequest type for any auth call to UIAA handler
 type userInteractiveFlowRequest struct {
-	// registration parameters
+	// parameters
 	Password string `json:"password"`
 	Username string `json:"username"`
 	Admin    bool   `json:"admin"`
@@ -61,12 +61,10 @@ type userInteractiveFlowRequest struct {
 	Type authtypes.LoginType `json:"type"`
 }
 
-type userInteractiveResponseHandler func(
-	*http.Request,
-	userInteractiveFlowRequest,
-	// some other param such as username or appserviceId
-	string,
-) util.JSONResponse
+type userInteractiveHandlerResponse struct {
+	AppserviceID string `json:"appservice_id"`
+	//todo may be some other param if required by other endpoints
+}
 
 // http://matrix.org/speculator/spec/HEAD/client_server/unstable.html#user-interactive-authentication-api
 type userInteractiveResponse struct {
@@ -255,7 +253,6 @@ func HandleUserInteractiveFlow(
 	sessionID string,
 	cfg *config.Dendrite,
 	res userInteractiveResponse,
-	responseHandler userInteractiveResponseHandler,
 ) util.JSONResponse {
 
 	// TODO: email / msisdn auth types.
@@ -300,7 +297,10 @@ func HandleUserInteractiveFlow(
 		// If no error, application service was successfully validated.
 		// Don't need to worry about appending to stages as
 		// application services are entirely separate.
-		return responseHandler(req, r, appserviceID)
+		return util.JSONResponse{
+			Code: 200,
+			JSON: userInteractiveHandlerResponse{appserviceID},
+		}
 
 	case authtypes.LoginTypeDummy:
 		// there is nothing to do
@@ -317,7 +317,7 @@ func HandleUserInteractiveFlow(
 	// Check if the user's flow has been completed successfully
 	// A response with current flow and remaining available methods
 	// will be returned if a flow has not been successfully completed yet
-	return checkAndCompleteFlow(sessions[sessionID], req, r, sessionID, res, responseHandler)
+	return checkAndCompleteFlow(sessions[sessionID], sessionID, res)
 }
 
 // checkAndCompleteFlow checks if a given flow is completed given
@@ -325,15 +325,15 @@ func HandleUserInteractiveFlow(
 // response with
 func checkAndCompleteFlow(
 	flow []authtypes.LoginType,
-	req *http.Request,
-	r userInteractiveFlowRequest,
 	sessionID string,
 	res userInteractiveResponse,
-	responseHandler userInteractiveResponseHandler,
 ) util.JSONResponse {
 	if checkFlowCompleted(flow, res.Flows) {
 		// This flow was completed, task can continue
-		return responseHandler(req, r, "")
+		return util.JSONResponse{
+			Code: 200,
+			JSON: userInteractiveHandlerResponse{""},
+		}
 	}
 
 	// There are still more stages to complete.

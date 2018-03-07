@@ -203,32 +203,28 @@ func Register(
 	// TODO: Handle loading of previous session parameters from database.
 	// TODO: Handle mapping registrationRequest parameters into session parameters
 
-	return HandleUserInteractiveFlow(req, r.userInteractiveFlowRequest, sessionID, cfg,
+	jsonRes := HandleUserInteractiveFlow(req, r.userInteractiveFlowRequest, sessionID, cfg,
 		userInteractiveResponse{
 			// passing the list of allowed Flows and Params
 			cfg.Derived.Registration.Flows,
 			nil,
 			cfg.Derived.Registration.Params,
 			"",
-		}, wrapperFunction(accountDB, deviceDB, r))
-}
+		})
+	if jsonRes.Code == 200 {
+		// cast JSON to userInteractiveHandlerResponse
+		res := jsonRes.JSON.(userInteractiveHandlerResponse)
 
-// A function that will be called if flow completes
-// the call parameters of inside function are generic return parameters from flowhandler
-// the registration specific params are on wrapper function and are passed from handleRegistrationflow
-// while passing the wrapperFunction to handleUserInteractiveFlow
-func wrapperFunction(accountDB *accounts.Database, deviceDB *devices.Database, r registerRequest) func(
-	req *http.Request, r userInteractiveFlowRequest, AppServiceID string) util.JSONResponse {
-	return func(req *http.Request, res userInteractiveFlowRequest, AppServiceID string) util.JSONResponse {
 		return completeRegistration(
 			req.Context(),
 			accountDB,
 			deviceDB,
-			res.Username,
-			res.Password,
-			AppServiceID,
+			r.Username,
+			r.Password,
+			res.AppserviceID,
 			r.InitialDisplayName)
 	}
+	return jsonRes
 }
 
 // LegacyRegister process register requests from the legacy v1 API
