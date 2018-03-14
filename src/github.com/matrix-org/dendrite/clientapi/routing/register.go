@@ -19,18 +19,12 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
-	"regexp"
-	"sort"
-	"strings"
-	"time"
-
 	"github.com/matrix-org/dendrite/common/config"
+	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/matrix-org/dendrite/clientapi/auth"
 	"github.com/matrix-org/dendrite/clientapi/auth/authtypes"
@@ -49,31 +43,6 @@ const (
 	maxUsernameLength = 254 // http://matrix.org/speculator/spec/HEAD/intro.html#user-identifiers TODO account for domain
 	sessionIDLength   = 24
 )
-
-// sessionsDict keeps track of completed auth stages for each session.
-type sessionsDict struct {
-	sessions map[string][]authtypes.LoginType
-}
-
-// GetCompletedStages returns the completed stages for a session.
-func (d sessionsDict) GetCompletedStages(sessionID string) []authtypes.LoginType {
-	if completedStages, ok := d.sessions[sessionID]; ok {
-		return completedStages
-	}
-	// Ensure that a empty slice is returned and not nil. See #399.
-	return make([]authtypes.LoginType, 0)
-}
-
-// AAddCompletedStage records that a session has completed an auth stage.
-func (d *sessionsDict) AddCompletedStage(sessionID string, stage authtypes.LoginType) {
-	d.sessions[sessionID] = append(d.GetCompletedStages(sessionID), stage)
-}
-
-func newSessionsDict() *sessionsDict {
-	return &sessionsDict{
-		sessions: make(map[string][]authtypes.LoginType),
-	}
-}
 
 var (
 	// TODO: Remove old sessions. Need to do so on a session-specific timeout.
@@ -94,31 +63,13 @@ type registerRequest struct {
 	Username string `json:"username"`
 	Admin    bool   `json:"admin"`
 	// user-interactive auth params
-	Auth authDict `json:"auth"`
+	userInteractiveFlowRequest
 
 	InitialDisplayName *string `json:"initial_device_display_name"`
 
 	// Application Services place Type in the root of their registration
 	// request, whereas clients place it in the authDict struct.
 	Type authtypes.LoginType `json:"type"`
-}
-
-type authDict struct {
-	Type    authtypes.LoginType         `json:"type"`
-	Session string                      `json:"session"`
-	Mac     gomatrixserverlib.HexString `json:"mac"`
-
-	// Recaptcha
-	Response string `json:"response"`
-	// TODO: Lots of custom keys depending on the type
-}
-
-// http://matrix.org/speculator/spec/HEAD/client_server/unstable.html#user-interactive-authentication-api
-type userInteractiveResponse struct {
-	Flows     []authtypes.Flow       `json:"flows"`
-	Completed []authtypes.LoginType  `json:"completed"`
-	Params    map[string]interface{} `json:"params"`
-	Session   string                 `json:"session"`
 }
 
 // legacyRegisterRequest represents the submitted registration request for v1 API.
@@ -130,32 +81,12 @@ type legacyRegisterRequest struct {
 	Mac      gomatrixserverlib.HexString `json:"mac"`
 }
 
-// newUserInteractiveResponse will return a struct to be sent back to the client
-// during registration.
-func newUserInteractiveResponse(
-	sessionID string,
-	fs []authtypes.Flow,
-	params map[string]interface{},
-) userInteractiveResponse {
-	return userInteractiveResponse{
-		fs, sessions.GetCompletedStages(sessionID), params, sessionID,
-	}
-}
-
 // http://matrix.org/speculator/spec/HEAD/client_server/unstable.html#post-matrix-client-unstable-register
 type registerResponse struct {
 	UserID      string                       `json:"user_id"`
 	AccessToken string                       `json:"access_token"`
 	HomeServer  gomatrixserverlib.ServerName `json:"home_server"`
 	DeviceID    string                       `json:"device_id"`
-}
-
-// recaptchaResponse represents the HTTP response from a Google Recaptcha server
-type recaptchaResponse struct {
-	Success     bool      `json:"success"`
-	ChallengeTS time.Time `json:"challenge_ts"`
-	Hostname    string    `json:"hostname"`
-	ErrorCodes  []int     `json:"error-codes"`
 }
 
 // validateUserName returns an error response if the username is invalid
@@ -192,72 +123,6 @@ func validatePassword(password string) *util.JSONResponse {
 		return &util.JSONResponse{
 			Code: http.StatusBadRequest,
 			JSON: jsonerror.WeakPassword(fmt.Sprintf("password too weak: min %d chars", minPasswordLength)),
-		}
-	}
-	return nil
-}
-
-// validateRecaptcha returns an error response if the captcha response is invalid
-func validateRecaptcha(
-	cfg *config.Dendrite,
-	response string,
-	clientip string,
-) *util.JSONResponse {
-	if !cfg.Matrix.RecaptchaEnabled {
-		return &util.JSONResponse{
-			Code: http.StatusBadRequest,
-			JSON: jsonerror.BadJSON("Captcha registration is disabled"),
-		}
-	}
-
-	if response == "" {
-		return &util.JSONResponse{
-			Code: http.StatusBadRequest,
-			JSON: jsonerror.BadJSON("Captcha response is required"),
-		}
-	}
-
-	// Make a POST request to Google's API to check the captcha response
-	resp, err := http.PostForm(cfg.Matrix.RecaptchaSiteVerifyAPI,
-		url.Values{
-			"secret":   {cfg.Matrix.RecaptchaPrivateKey},
-			"response": {response},
-			"remoteip": {clientip},
-		},
-	)
-
-	if err != nil {
-		return &util.JSONResponse{
-			Code: http.StatusInternalServerError,
-			JSON: jsonerror.BadJSON("Error in requesting validation of captcha response"),
-		}
-	}
-
-	// Close the request once we're finishing reading from it
-	defer resp.Body.Close() // nolint: errcheck
-
-	// Grab the body of the response from the captcha server
-	var r recaptchaResponse
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return &util.JSONResponse{
-			Code: http.StatusInternalServerError,
-			JSON: jsonerror.BadJSON("Error in contacting captcha server" + err.Error()),
-		}
-	}
-	err = json.Unmarshal(body, &r)
-	if err != nil {
-		return &util.JSONResponse{
-			Code: http.StatusInternalServerError,
-			JSON: jsonerror.BadJSON("Error in unmarshaling captcha server's response: " + err.Error()),
-		}
-	}
-
-	// Check that we received a "success"
-	if !r.Success {
-		return &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: jsonerror.BadJSON("Invalid captcha response. Please try again."),
 		}
 	}
 	return nil
@@ -316,55 +181,6 @@ func UsernameMatchesMultipleExclusiveNamespaces(
 	return matchCount > 1
 }
 
-// validateApplicationService checks if a provided application service token
-// corresponds to one that is registered. If so, then it checks if the desired
-// username is within that application service's namespace. As long as these
-// two requirements are met, no error will be returned.
-func validateApplicationService(
-	cfg *config.Dendrite,
-	req *http.Request,
-	username string,
-) (string, *util.JSONResponse) {
-	// Check if the token if the application service is valid with one we have
-	// registered in the config.
-	accessToken := req.URL.Query().Get("access_token")
-	var matchedApplicationService *config.ApplicationService
-	for _, appservice := range cfg.Derived.ApplicationServices {
-		if appservice.ASToken == accessToken {
-			matchedApplicationService = &appservice
-			break
-		}
-	}
-	if matchedApplicationService == nil {
-		return "", &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: jsonerror.UnknownToken("Supplied access_token does not match any known application service"),
-		}
-	}
-
-	// Ensure the desired username is within at least one of the application service's namespaces.
-	if !UsernameIsWithinApplicationServiceNamespace(cfg, username, matchedApplicationService) {
-		// If we didn't find any matches, return M_EXCLUSIVE
-		return "", &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: jsonerror.ASExclusive(fmt.Sprintf(
-				"Supplied username %s did not match any namespaces for application service ID: %s", username, matchedApplicationService.ID)),
-		}
-	}
-
-	// Check this user does not fit multiple application service namespaces
-	if UsernameMatchesMultipleExclusiveNamespaces(cfg, username) {
-		return "", &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: jsonerror.ASExclusive(fmt.Sprintf(
-				"Supplied username %s matches multiple exclusive application service namespaces. Only 1 match allowed", username)),
-		}
-	}
-
-	// No errors, registration valid
-	return matchedApplicationService.ID, nil
-}
-
 // Register processes a /register request.
 // http://matrix.org/speculator/spec/HEAD/client_server/unstable.html#post-matrix-client-unstable-register
 func Register(
@@ -387,22 +203,18 @@ func Register(
 		sessionID = util.RandomString(sessionIDLength)
 	}
 
-	// If no auth type is specified by the client, send back the list of available flows
-	if r.Auth.Type == "" {
-		return util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: newUserInteractiveResponse(sessionID,
-				cfg.Derived.Registration.Flows, cfg.Derived.Registration.Params),
-		}
+	if cfg.Matrix.RegistrationDisabled && r.Auth.Type != authtypes.LoginTypeSharedSecret {
+		return util.MessageResponse(http.StatusForbidden, "Registration has been disabled")
+	}
+
+	if res := handleLoginTypes(req, r, cfg, sessionID); res.Code != http.StatusOK {
+		return res
 	}
 
 	// Squash username to all lowercase letters
 	r.Username = strings.ToLower(r.Username)
 
-	if resErr = validateUserName(r.Username); resErr != nil {
-		return *resErr
-	}
-	if resErr = validatePassword(r.Password); resErr != nil {
+	if resErr = ValidateCredentials(r.Username, r.Password); resErr != nil {
 		return *resErr
 	}
 
@@ -424,7 +236,38 @@ func Register(
 		"session_id": r.Auth.Session,
 	}).Info("Processing registration request")
 
+	// TODO: Enable registration config flag
+	// TODO: Guest account upgrading
+	// TODO: Handle loading of previous session parameters from database.
+	// TODO: Handle mapping registrationRequest parameters into session parameters
+
 	return handleRegistrationFlow(req, r, sessionID, cfg, accountDB, deviceDB)
+}
+
+func handleLoginTypes(req *http.Request, r registerRequest, cfg *config.Dendrite, sessionID string) util.JSONResponse {
+	// If no auth type is specified by the client, send back the list of available flows
+	if r.Auth.Type == "" {
+		return util.JSONResponse{
+			Code: http.StatusUnauthorized,
+			JSON: newUserInteractiveResponse(sessionID,
+				cfg.Derived.Registration.Flows, cfg.Derived.Registration.Params),
+		}
+	}
+	if r.Auth.Type == authtypes.LoginTypeSharedSecret {
+		// Check shared secret against config
+		valid, err := isValidMacLogin(cfg, r.Username, r.Password, r.Admin, r.Auth.Mac)
+
+		if err != nil {
+			return httputil.LogThenError(req, err)
+		} else if !valid {
+			return util.MessageResponse(http.StatusForbidden, "HMAC incorrect")
+		}
+
+		// Add SharedSecret to the list of completed stages
+		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeSharedSecret)
+	}
+
+	return util.JSONResponse{Code: http.StatusOK}
 }
 
 // handleRegistrationFlow will direct and complete registration flow stages
@@ -437,102 +280,74 @@ func handleRegistrationFlow(
 	accountDB *accounts.Database,
 	deviceDB *devices.Database,
 ) util.JSONResponse {
-	// TODO: Shared secret registration (create new user scripts)
-	// TODO: Enable registration config flag
-	// TODO: Guest account upgrading
+	appservice, jsonRes := HandleUserInteractiveFlow(req, r.userInteractiveFlowRequest, sessionID, cfg,
+		allowedFlowList{
+			// passing the list of allowed Flows and Params
+			cfg.Derived.Registration.Flows,
+			cfg.Derived.Registration.Params,
+		})
 
-	// TODO: Handle loading of previous session parameters from database.
-	// TODO: Handle mapping registrationRequest parameters into session parameters
-
-	// TODO: email / msisdn auth types.
-
-	if cfg.Matrix.RegistrationDisabled && r.Auth.Type != authtypes.LoginTypeSharedSecret {
-		return util.MessageResponse(http.StatusForbidden, "Registration has been disabled")
-	}
-
-	switch r.Auth.Type {
-	case authtypes.LoginTypeRecaptcha:
-		// Check given captcha response
-		resErr := validateRecaptcha(cfg, r.Auth.Response, req.RemoteAddr)
-		if resErr != nil {
-			return *resErr
-		}
-
-		// Add Recaptcha to the list of completed registration stages
-		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeRecaptcha)
-
-	case authtypes.LoginTypeSharedSecret:
-		// Check shared secret against config
-		valid, err := isValidMacLogin(cfg, r.Username, r.Password, r.Admin, r.Auth.Mac)
-
-		if err != nil {
-			return httputil.LogThenError(req, err)
-		} else if !valid {
-			return util.MessageResponse(http.StatusForbidden, "HMAC incorrect")
-		}
-
-		// Add SharedSecret to the list of completed registration stages
-		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeSharedSecret)
-
-	case authtypes.LoginTypeApplicationService:
-		// Check Application Service register user request is valid.
-		// The application service's ID is returned if so.
-		appserviceID, err := validateApplicationService(cfg, req, r.Username)
-
+	appserviceID := ""
+	if appservice != nil {
+		err := validateApplicationServiceNamespaces(cfg, r.Username, appservice)
 		if err != nil {
 			return *err
 		}
+		appserviceID = appservice.ID
+	}
 
-		// If no error, application service was successfully validated.
-		// Don't need to worry about appending to registration stages as
-		// application service registration is entirely separate.
-		return completeRegistration(req.Context(), accountDB, deviceDB,
-			r.Username, "", appserviceID, r.InitialDisplayName)
+	if jsonRes.Code == 200 {
+		return completeRegistration(
+			req.Context(),
+			accountDB,
+			deviceDB,
+			r.Username,
+			r.Password,
+			appserviceID,
+			r.InitialDisplayName)
+	}
+	return jsonRes
+}
 
-	case authtypes.LoginTypeDummy:
-		// there is nothing to do
-		// Add Dummy to the list of completed registration stages
-		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeDummy)
+// ValidateCredentials Function wrapper
+func ValidateCredentials(username, password string) *util.JSONResponse {
+	if resErr := validateUserName(username); resErr != nil {
+		return resErr
+	}
+	if resErr := validatePassword(password); resErr != nil {
+		return resErr
+	}
+	return nil
+}
 
-	default:
-		return util.JSONResponse{
-			Code: http.StatusNotImplemented,
-			JSON: jsonerror.Unknown("unknown/unimplemented auth type"),
+func validateApplicationServiceNamespaces(
+	cfg *config.Dendrite,
+	username string,
+	matchedApplicationService *config.ApplicationService,
+) *util.JSONResponse {
+	// Ensure the desired username is within at least one of the application service's namespaces.
+	if !UsernameIsWithinApplicationServiceNamespace(cfg, username, matchedApplicationService) {
+		// If we didn't find any matches, return M_EXCLUSIVE
+		return &util.JSONResponse{
+			Code: http.StatusUnauthorized,
+			JSON: jsonerror.ASExclusive(fmt.Sprintf(
+				"Supplied username %s did not match any namespaces for application service ID: %s",
+				username,
+				matchedApplicationService.ID)),
 		}
 	}
 
-	// Check if the user's registration flow has been completed successfully
-	// A response with current registration flow and remaining available methods
-	// will be returned if a flow has not been successfully completed yet
-	return checkAndCompleteFlow(sessions.GetCompletedStages(sessionID),
-		req, r, sessionID, cfg, accountDB, deviceDB)
-}
-
-// checkAndCompleteFlow checks if a given registration flow is completed given
-// a set of allowed flows. If so, registration is completed, otherwise a
-// response with
-func checkAndCompleteFlow(
-	flow []authtypes.LoginType,
-	req *http.Request,
-	r registerRequest,
-	sessionID string,
-	cfg *config.Dendrite,
-	accountDB *accounts.Database,
-	deviceDB *devices.Database,
-) util.JSONResponse {
-	if checkFlowCompleted(flow, cfg.Derived.Registration.Flows) {
-		// This flow was completed, registration can continue
-		return completeRegistration(req.Context(), accountDB, deviceDB,
-			r.Username, r.Password, "", r.InitialDisplayName)
+	// Check this user does not fit multiple application service namespaces
+	if UsernameMatchesMultipleExclusiveNamespaces(cfg, username) {
+		return &util.JSONResponse{
+			Code: http.StatusUnauthorized,
+			JSON: jsonerror.ASExclusive(fmt.Sprintf(
+				"Supplied username %s matches multiple exclusive application service namespaces. Only 1 match allowed",
+				username)),
+		}
 	}
 
-	// There are still more stages to complete.
-	// Return the flows and those that have been completed.
-	return util.JSONResponse{
-		Code: http.StatusUnauthorized,
-		JSON: newUserInteractiveResponse(sessionID,
-			cfg.Derived.Registration.Flows, cfg.Derived.Registration.Params),
-	}
+	return nil
 }
 
 // LegacyRegister process register requests from the legacy v1 API
@@ -717,58 +532,6 @@ func isValidMacLogin(
 	expectedMAC := mac.Sum(nil)
 
 	return hmac.Equal(givenMac, expectedMAC), nil
-}
-
-// checkFlows checks a single completed flow against another required one. If
-// one contains at least all of the stages that the other does, checkFlows
-// returns true.
-func checkFlows(
-	completedStages []authtypes.LoginType,
-	requiredStages []authtypes.LoginType,
-) bool {
-	// Create temporary slices so they originals will not be modified on sorting
-	completed := make([]authtypes.LoginType, len(completedStages))
-	required := make([]authtypes.LoginType, len(requiredStages))
-	copy(completed, completedStages)
-	copy(required, requiredStages)
-
-	// Sort the slices for simple comparison
-	sort.Slice(completed, func(i, j int) bool { return completed[i] < completed[j] })
-	sort.Slice(required, func(i, j int) bool { return required[i] < required[j] })
-
-	// Iterate through each slice, going to the next required slice only once
-	// we've found a match.
-	i, j := 0, 0
-	for j < len(required) {
-		// Exit if we've reached the end of our input without being able to
-		// match all of the required stages.
-		if i >= len(completed) {
-			return false
-		}
-
-		// If we've found a stage we want, move on to the next required stage.
-		if completed[i] == required[j] {
-			j++
-		}
-		i++
-	}
-	return true
-}
-
-// checkFlowCompleted checks if a registration flow complies with any allowed flow
-// dictated by the server. Order of stages does not matter. A user may complete
-// extra stages as long as the required stages of at least one flow is met.
-func checkFlowCompleted(
-	flow []authtypes.LoginType,
-	allowedFlows []authtypes.Flow,
-) bool {
-	// Iterate through possible flows to check whether any have been fully completed.
-	for _, allowedFlow := range allowedFlows {
-		if checkFlows(flow, allowedFlow.Stages) {
-			return true
-		}
-	}
-	return false
 }
 
 type availableResponse struct {
