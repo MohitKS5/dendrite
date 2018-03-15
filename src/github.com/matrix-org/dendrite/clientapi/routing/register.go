@@ -63,13 +63,9 @@ type registerRequest struct {
 	Username string `json:"username"`
 	Admin    bool   `json:"admin"`
 	// user-interactive auth params
-	userInteractiveFlowRequest
+	UserInteractiveFlowRequest
 
 	InitialDisplayName *string `json:"initial_device_display_name"`
-
-	// Application Services place Type in the root of their registration
-	// request, whereas clients place it in the authDict struct.
-	Type authtypes.LoginType `json:"type"`
 }
 
 // legacyRegisterRequest represents the submitted registration request for v1 API.
@@ -87,6 +83,16 @@ type registerResponse struct {
 	AccessToken string                       `json:"access_token"`
 	HomeServer  gomatrixserverlib.ServerName `json:"home_server"`
 	DeviceID    string                       `json:"device_id"`
+}
+
+func validateCredentials(username, password string) *util.JSONResponse {
+	if resErr := validateUserName(username); resErr != nil {
+		return resErr
+	}
+	if resErr := validatePassword(password); resErr != nil {
+		return resErr
+	}
+	return nil
 }
 
 // validateUserName returns an error response if the username is invalid
@@ -207,15 +213,15 @@ func Register(
 		return util.MessageResponse(http.StatusForbidden, "Registration has been disabled")
 	}
 
-	if res := handleLoginTypes(req, r, cfg, sessionID); res.Code != http.StatusOK {
-		return res
-	}
-
 	// Squash username to all lowercase letters
 	r.Username = strings.ToLower(r.Username)
 
-	if resErr = ValidateCredentials(r.Username, r.Password); resErr != nil {
+	if resErr = validateCredentials(r.Username, r.Password); resErr != nil {
 		return *resErr
+	}
+
+	if res := handleLoginTypes(req, r, cfg, sessionID); res != nil {
+		return *res
 	}
 
 	// Make sure normal user isn't registering under an exclusive application
@@ -236,38 +242,27 @@ func Register(
 		"session_id": r.Auth.Session,
 	}).Info("Processing registration request")
 
-	// TODO: Enable registration config flag
-	// TODO: Guest account upgrading
-	// TODO: Handle loading of previous session parameters from database.
-	// TODO: Handle mapping registrationRequest parameters into session parameters
-
 	return handleRegistrationFlow(req, r, sessionID, cfg, accountDB, deviceDB)
 }
 
-func handleLoginTypes(req *http.Request, r registerRequest, cfg *config.Dendrite, sessionID string) util.JSONResponse {
-	// If no auth type is specified by the client, send back the list of available flows
-	if r.Auth.Type == "" {
-		return util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: newUserInteractiveResponse(sessionID,
-				cfg.Derived.Registration.Flows, cfg.Derived.Registration.Params),
-		}
-	}
+func handleLoginTypes(req *http.Request, r registerRequest, cfg *config.Dendrite, sessionID string) *util.JSONResponse {
 	if r.Auth.Type == authtypes.LoginTypeSharedSecret {
 		// Check shared secret against config
 		valid, err := isValidMacLogin(cfg, r.Username, r.Password, r.Admin, r.Auth.Mac)
 
 		if err != nil {
-			return httputil.LogThenError(req, err)
+			res := httputil.LogThenError(req, err)
+			return &res
 		} else if !valid {
-			return util.MessageResponse(http.StatusForbidden, "HMAC incorrect")
+			res := util.MessageResponse(http.StatusForbidden, "HMAC incorrect")
+			return &res
 		}
 
 		// Add SharedSecret to the list of completed stages
 		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeSharedSecret)
 	}
 
-	return util.JSONResponse{Code: http.StatusOK}
+	return nil
 }
 
 // handleRegistrationFlow will direct and complete registration flow stages
@@ -280,13 +275,7 @@ func handleRegistrationFlow(
 	accountDB *accounts.Database,
 	deviceDB *devices.Database,
 ) util.JSONResponse {
-	appservice, jsonRes := HandleUserInteractiveFlow(req, r.userInteractiveFlowRequest, sessionID, cfg,
-		allowedFlowList{
-			// passing the list of allowed Flows and Params
-			cfg.Derived.Registration.Flows,
-			cfg.Derived.Registration.Params,
-		})
-
+	appservice, jsonRes := HandleUserInteractiveFlow(req, r.UserInteractiveFlowRequest, sessionID, cfg, cfg.Derived.Registration)
 	appserviceID := ""
 	if appservice != nil {
 		err := validateApplicationServiceNamespaces(cfg, r.Username, appservice)
@@ -296,7 +285,7 @@ func handleRegistrationFlow(
 		appserviceID = appservice.ID
 	}
 
-	if jsonRes.Code == 200 {
+	if jsonRes == nil {
 		return completeRegistration(
 			req.Context(),
 			accountDB,
@@ -306,18 +295,12 @@ func handleRegistrationFlow(
 			appserviceID,
 			r.InitialDisplayName)
 	}
-	return jsonRes
-}
+	// TODO: Enable registration config flag
+	// TODO: Guest account upgrading
+	// TODO: Handle loading of previous session parameters from database.
+	// TODO: Handle mapping registrationRequest parameters into session parameters
 
-// ValidateCredentials Function wrapper
-func ValidateCredentials(username, password string) *util.JSONResponse {
-	if resErr := validateUserName(username); resErr != nil {
-		return resErr
-	}
-	if resErr := validatePassword(password); resErr != nil {
-		return resErr
-	}
-	return nil
+	return *jsonRes
 }
 
 func validateApplicationServiceNamespaces(

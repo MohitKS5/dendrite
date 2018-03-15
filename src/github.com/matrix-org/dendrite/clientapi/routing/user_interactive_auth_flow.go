@@ -65,8 +65,8 @@ func newSessionsDict() *sessionsDict {
 	}
 }
 
-// a generic flowRequest type for any auth call to UIAA handler
-type userInteractiveFlowRequest struct {
+// UserInteractiveFlowRequest is a generic flowRequest type for any auth call to UIAA handler
+type UserInteractiveFlowRequest struct {
 	// user-interactive auth params
 	Auth authDict `json:"auth"`
 
@@ -75,13 +75,9 @@ type userInteractiveFlowRequest struct {
 	Type authtypes.LoginType `json:"type"`
 }
 
-type allowedFlowList struct {
-	Flows  []authtypes.Flow
-	Params map[string]interface{}
-}
-
+// UserInteractiveResponse is response returned by UIAA flow handler to the client
 // http://matrix.org/speculator/spec/HEAD/client_server/unstable.html#user-interactive-authentication-api
-type userInteractiveResponse struct {
+type UserInteractiveResponse struct {
 	Flows     []authtypes.Flow       `json:"flows"`
 	Completed []authtypes.LoginType  `json:"completed"`
 	Params    map[string]interface{} `json:"params"`
@@ -93,8 +89,8 @@ func newUserInteractiveResponse(
 	sessionID string,
 	fs []authtypes.Flow,
 	params map[string]interface{},
-) userInteractiveResponse {
-	return userInteractiveResponse{
+) UserInteractiveResponse {
+	return UserInteractiveResponse{
 		fs, sessions.GetCompletedStages(sessionID), params, sessionID,
 	}
 }
@@ -203,20 +199,24 @@ func validateApplicationService(
 }
 
 // HandleUserInteractiveFlow will direct and complete UIAA flow stages that the client has requested.
+// It accepts the a pointer to http request, an interface of type UserInteractiveFlowRequest, config,
+// sessionID and a list of required stages to complete the flow as config.UserInteractiveAuthConfig
+// and returns UserInteractiveResponse as specified in
+// https://matrix.org/docs/spec/client_server/r0.3.0.html#user-interactive-authentication-api
 func HandleUserInteractiveFlow(
 	req *http.Request,
-	r userInteractiveFlowRequest,
+	r UserInteractiveFlowRequest,
 	sessionID string,
 	cfg *config.Dendrite,
-	res allowedFlowList,
-) (*config.ApplicationService, util.JSONResponse) {
+	res config.UserInteractiveAuthConfig,
+) (*config.ApplicationService, *util.JSONResponse) {
 
 	// TODO: email / msisdn auth types.
 
 	switch r.Auth.Type {
 	case "":
 		// If no auth type is specified by the client, send back the list of available flows
-		return nil, util.JSONResponse{
+		return nil, &util.JSONResponse{
 			Code: http.StatusUnauthorized,
 			JSON: newUserInteractiveResponse(sessionID,
 				res.Flows, res.Params),
@@ -226,7 +226,7 @@ func HandleUserInteractiveFlow(
 		// Check given captcha response
 		resErr := validateRecaptcha(cfg, r.Auth.Response, req.RemoteAddr)
 		if resErr != nil {
-			return nil, *resErr
+			return nil, resErr
 		}
 
 		// Add Recaptcha to the list of completed stages
@@ -238,13 +238,13 @@ func HandleUserInteractiveFlow(
 		matchedAppservice, err := validateApplicationService(cfg, req)
 
 		if err != nil {
-			return nil, *err
+			return nil, err
 		}
 
 		// If no error, application service was successfully validated.
 		// Don't need to worry about appending to stages as
 		// application services are entirely separate.
-		return matchedAppservice, util.JSONResponse{
+		return matchedAppservice, &util.JSONResponse{
 			Code: 200,
 		}
 
@@ -254,7 +254,7 @@ func HandleUserInteractiveFlow(
 		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeDummy)
 
 	default:
-		return nil, util.JSONResponse{
+		return nil, &util.JSONResponse{
 			Code: http.StatusNotImplemented,
 			JSON: jsonerror.Unknown("unknown/unimplemented auth type"),
 		}
@@ -268,25 +268,23 @@ func HandleUserInteractiveFlow(
 
 // checkAndCompleteFlow checks if a given flow is completed given
 // a set of allowed flows. If so, task is completed, otherwise a
-// response with
+// response with more stages to complete is returned.
 func checkAndCompleteFlow(
 	flow []authtypes.LoginType,
 	sessionID string,
-	res allowedFlowList,
-) util.JSONResponse {
-	if checkFlowCompleted(flow, res.Flows) {
+	allowedFlows config.UserInteractiveAuthConfig,
+) *util.JSONResponse {
+	if checkFlowCompleted(flow, allowedFlows.Flows) {
 		// This flow was completed, task can continue
-		return util.JSONResponse{
-			Code: 200,
-		}
+		return nil
 	}
 
 	// There are still more stages to complete.
 	// Return the flows and those that have been completed.
-	return util.JSONResponse{
+	return &util.JSONResponse{
 		Code: http.StatusUnauthorized,
 		JSON: newUserInteractiveResponse(sessionID,
-			res.Flows, res.Params),
+			allowedFlows.Flows, allowedFlows.Params),
 	}
 }
 

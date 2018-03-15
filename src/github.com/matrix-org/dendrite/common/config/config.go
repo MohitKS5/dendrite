@@ -216,18 +216,7 @@ type Dendrite struct {
 
 	// Any information derived from the configuration options for later use.
 	Derived struct {
-		Registration struct {
-			// Flows is a slice of flows, which represent one possible way that the client can authenticate a request.
-			// http://matrix.org/docs/spec/HEAD/client_server/r0.3.0.html#user-interactive-authentication-api
-			// As long as the generated flows only rely on config file options,
-			// we can generate them on startup and store them until needed
-			Flows []authtypes.Flow `json:"flows"`
-
-			// Params that need to be returned to the client during
-			// registration in order to complete registration stages.
-			Params map[string]interface{} `json:"params"`
-		}
-
+		Registration UserInteractiveAuthConfig
 		// Application Services parsed from their config files
 		// The paths of which were given above in the main config file
 		ApplicationServices []ApplicationService
@@ -239,6 +228,19 @@ type Dendrite struct {
 
 		// TODO: Exclusive alias, room regexp's
 	} `yaml:"-"`
+}
+
+// UserInteractiveAuthConfig , a call param to HandleUserInteractiveFlow handler with list of allowed stages.
+type UserInteractiveAuthConfig struct {
+	// Flows is a slice of flows, which represent one possible way that the client can authenticate a request.
+	// http://matrix.org/docs/spec/HEAD/client_server/r0.3.0.html#user-interactive-authentication-api
+	// As long as the generated flows only rely on config file options,
+	// we can generate them on startup and store them until needed
+	Flows []authtypes.Flow `json:"flows"`
+
+	// Params that need to be returned to the client during
+	// registration in order to complete auth stages.
+	Params map[string]interface{} `json:"params"`
 }
 
 // A Path on the filesystem.
