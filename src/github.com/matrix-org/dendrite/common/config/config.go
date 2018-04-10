@@ -230,7 +230,7 @@ type Dendrite struct {
 	} `yaml:"-"`
 }
 
-// UserInteractiveAuthConfig , a call param to HandleUserInteractiveFlow handler with list of allowed stages.
+// UserInteractiveAuthConfig, auth stages for user interactive Flow API
 type UserInteractiveAuthConfig struct {
 	// Flows is a slice of flows, which represent one possible way that the client can authenticate a request.
 	// http://matrix.org/docs/spec/HEAD/client_server/r0.3.0.html#user-interactive-authentication-api
@@ -238,8 +238,8 @@ type UserInteractiveAuthConfig struct {
 	// we can generate them on startup and store them until needed
 	Flows []authtypes.Flow `json:"flows"`
 
-	// Params that need to be returned to the client during
-	// registration in order to complete auth stages.
+	// Params that need to be returned to the client
+	// in order to complete auth stages.
 	Params map[string]interface{} `json:"params"`
 }
 
