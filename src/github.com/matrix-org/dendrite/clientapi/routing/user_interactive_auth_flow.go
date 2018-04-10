@@ -169,54 +169,26 @@ func validateRecaptcha(
 	return nil
 }
 
-// validateApplicationService checks if a provided application service token
-// corresponds to one that is registered. If so, then it checks if the desired
-// username is within that application service's namespace. As long as these
-// two requirements are met, no error will be returned.
-func validateApplicationService(
-	cfg *config.Dendrite,
-	req *http.Request,
-) (*config.ApplicationService, *util.JSONResponse) {
-	// Check if the token if the application service is valid with one we have
-	// registered in the config.
-	accessToken := req.URL.Query().Get("access_token")
-	var matchedApplicationService *config.ApplicationService
-	for _, appservice := range cfg.Derived.ApplicationServices {
-		if appservice.ASToken == accessToken {
-			matchedApplicationService = &appservice
-			break
-		}
-	}
-	if matchedApplicationService != nil {
-		return nil, &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: jsonerror.UnknownToken("Supplied access_token does not match any known application service"),
-		}
-	}
-
-	// No errors, valid
-	return matchedApplicationService, nil
-}
-
 // HandleUserInteractiveFlow will direct and complete UIAA flow stages that the client has requested.
-// It accepts the a pointer to http request, an interface of type UserInteractiveFlowRequest, config,
+// It accepts a pointer to http request, an interface of type UserInteractiveFlowRequest, config,
 // sessionID and a list of required stages to complete the flow as config.UserInteractiveAuthConfig
 // and returns UserInteractiveResponse as specified in
 // https://matrix.org/docs/spec/client_server/r0.3.0.html#user-interactive-authentication-api
+// The function returns nil if authenticated successfully.
 func HandleUserInteractiveFlow(
 	req *http.Request,
 	r UserInteractiveFlowRequest,
 	sessionID string,
 	cfg *config.Dendrite,
 	res config.UserInteractiveAuthConfig,
-) (*config.ApplicationService, *util.JSONResponse) {
+) *util.JSONResponse {
 
 	// TODO: email / msisdn auth types.
 
 	switch r.Auth.Type {
 	case "":
 		// If no auth type is specified by the client, send back the list of available flows
-		return nil, &util.JSONResponse{
+		return &util.JSONResponse{
 			Code: http.StatusUnauthorized,
 			JSON: newUserInteractiveResponse(sessionID,
 				res.Flows, res.Params),
@@ -226,27 +198,11 @@ func HandleUserInteractiveFlow(
 		// Check given captcha response
 		resErr := validateRecaptcha(cfg, r.Auth.Response, req.RemoteAddr)
 		if resErr != nil {
-			return nil, resErr
+			return resErr
 		}
 
 		// Add Recaptcha to the list of completed stages
 		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeRecaptcha)
-
-	case authtypes.LoginTypeApplicationService:
-		// Check Application Service register user request is valid.
-		// The application service's ID is returned if so.
-		matchedAppservice, err := validateApplicationService(cfg, req)
-
-		if err != nil {
-			return nil, err
-		}
-
-		// If no error, application service was successfully validated.
-		// Don't need to worry about appending to stages as
-		// application services are entirely separate.
-		return matchedAppservice, &util.JSONResponse{
-			Code: 200,
-		}
 
 	case authtypes.LoginTypeDummy:
 		// there is nothing to do
@@ -254,7 +210,7 @@ func HandleUserInteractiveFlow(
 		sessions.AddCompletedStage(sessionID, authtypes.LoginTypeDummy)
 
 	default:
-		return nil, &util.JSONResponse{
+		return &util.JSONResponse{
 			Code: http.StatusNotImplemented,
 			JSON: jsonerror.Unknown("unknown/unimplemented auth type"),
 		}
@@ -263,7 +219,7 @@ func HandleUserInteractiveFlow(
 	// Check if the user's flow has been completed successfully
 	// A response with current flow and remaining available methods
 	// will be returned if a flow has not been successfully completed yet
-	return nil, checkAndCompleteFlow(sessions.GetCompletedStages(sessionID), sessionID, res)
+	return checkAndCompleteFlow(sessions.GetCompletedStages(sessionID), sessionID, res)
 }
 
 // checkAndCompleteFlow checks if a given flow is completed given

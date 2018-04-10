@@ -220,10 +220,6 @@ func Register(
 		return *resErr
 	}
 
-	if res := handleLoginTypes(req, r, cfg, sessionID); res != nil {
-		return *res
-	}
-
 	// Make sure normal user isn't registering under an exclusive application
 	// service namespace. Skip this check if no app services are registered.
 	if r.Auth.Type != "m.login.application_service" &&
@@ -245,7 +241,7 @@ func Register(
 	return handleRegistrationFlow(req, r, sessionID, cfg, accountDB, deviceDB)
 }
 
-func handleLoginTypes(req *http.Request, r registerRequest, cfg *config.Dendrite, sessionID string) *util.JSONResponse {
+func handleLoginTypeSharedSecret(req *http.Request, r registerRequest, cfg *config.Dendrite, sessionID string) *util.JSONResponse {
 	if r.Auth.Type == authtypes.LoginTypeSharedSecret {
 		// Check shared secret against config
 		valid, err := isValidMacLogin(cfg, r.Username, r.Password, r.Admin, r.Auth.Mac)
@@ -275,7 +271,17 @@ func handleRegistrationFlow(
 	accountDB *accounts.Database,
 	deviceDB *devices.Database,
 ) util.JSONResponse {
-	appservice, jsonRes := HandleUserInteractiveFlow(req, r.UserInteractiveFlowRequest, sessionID, cfg, cfg.Derived.Registration)
+
+	if res := handleLoginTypeSharedSecret(req, r, cfg, sessionID); res != nil {
+		return *res
+	}
+
+	appservice, err := validateApplicationService(cfg, req)
+	if err != nil {
+		return *err
+	}
+
+	jsonRes := HandleUserInteractiveFlow(req, r.UserInteractiveFlowRequest, sessionID, cfg, cfg.Derived.Registration)
 	appserviceID := ""
 	if appservice != nil {
 		err := validateApplicationServiceNamespaces(cfg, r.Username, appservice)
@@ -555,4 +561,33 @@ func RegisterAvailable(
 			Available: true,
 		},
 	}
+}
+
+// validateApplicationService checks if a provided application service token
+// corresponds to one that is registered. If so, then it checks if the desired
+// username is within that application service's namespace. As long as these
+// two requirements are met, no error will be returned.
+func validateApplicationService(
+	cfg *config.Dendrite,
+	req *http.Request,
+) (*config.ApplicationService, *util.JSONResponse) {
+	// Check if the token if the application service is valid with one we have
+	// registered in the config.
+	accessToken := req.URL.Query().Get("access_token")
+	var matchedApplicationService *config.ApplicationService
+	for _, appservice := range cfg.Derived.ApplicationServices {
+		if appservice.ASToken == accessToken {
+			matchedApplicationService = &appservice
+			break
+		}
+	}
+	if matchedApplicationService != nil {
+		return nil, &util.JSONResponse{
+			Code: http.StatusUnauthorized,
+			JSON: jsonerror.UnknownToken("Supplied access_token does not match any known application service"),
+		}
+	}
+
+	// No errors, valid
+	return matchedApplicationService, nil
 }
