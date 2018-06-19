@@ -182,14 +182,6 @@ func HandleUserInteractiveFlow(
 	// TODO: email / msisdn auth types.
 
 	switch r.Auth.Type {
-	case "":
-		// If no auth type is specified by the client, send back the list of available flows
-		return &util.JSONResponse{
-			Code: http.StatusUnauthorized,
-			JSON: newUserInteractiveResponse(sessionID,
-				res.Flows, res.Params),
-		}
-
 	case authtypes.LoginTypeRecaptcha:
 		// Check given captcha response
 		resErr := validateRecaptcha(cfg, r.Auth.Response, req.RemoteAddr)

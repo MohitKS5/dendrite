@@ -21,7 +21,6 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
-	"github.com/matrix-org/dendrite/common/config"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -33,6 +32,7 @@ import (
 	"github.com/matrix-org/dendrite/clientapi/auth/storage/devices"
 	"github.com/matrix-org/dendrite/clientapi/httputil"
 	"github.com/matrix-org/dendrite/clientapi/jsonerror"
+	"github.com/matrix-org/dendrite/common/config"
 	"github.com/matrix-org/gomatrixserverlib"
 	"github.com/matrix-org/util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -109,7 +109,13 @@ type registerResponse struct {
 // validateUserName returns an error response if the username is invalid
 func validateUserName(username string) *util.JSONResponse {
 	// https://github.com/matrix-org/synapse/blob/v0.20.0/synapse/rest/client/v2_alpha/register.py#L161
-	if len(username) > maxUsernameLength {
+	// Don't allow numeric usernames less than MAX_INT64.
+	if _, err := strconv.ParseInt(username, 10, 64); err == nil {
+		return &util.JSONResponse{
+			Code: http.StatusBadRequest,
+			JSON: jsonerror.InvalidUsername("Numeric user IDs are reserved"),
+		}
+	} else if len(username) > maxUsernameLength {
 		return &util.JSONResponse{
 			Code: http.StatusBadRequest,
 			JSON: jsonerror.BadJSON(fmt.Sprintf("'username' >%d characters", maxUsernameLength)),
@@ -146,14 +152,14 @@ func validatePassword(password string) *util.JSONResponse {
 }
 
 // validateCredentials returns error if username or password is invalid
-func validateCredentials(username, password string) (jsonerr *util.JSONResponse) {
-	jsonerr = validateUserName(username)
-	if jsonerr != nil {
+func validateCredentials(username, password string) (jsonError *util.JSONResponse) {
+	jsonError = validateUserName(username)
+	if jsonError != nil {
 		return
 	}
 
-	jsonerr = validatePassword(password)
-	if jsonerr != nil {
+	jsonError = validatePassword(password)
+	if jsonError != nil {
 		return
 	}
 	return nil
@@ -283,23 +289,6 @@ func Register(
 		sessionID = util.RandomString(sessionIDLength)
 	}
 
-	// Don't allow numeric usernames less than MAX_INT64.
-	if _, err := strconv.ParseInt(r.Username, 10, 64); err == nil {
-		return util.JSONResponse{
-			Code: http.StatusBadRequest,
-			JSON: jsonerror.InvalidUsername("Numeric user IDs are reserved"),
-		}
-	}
-	// Auto generate a numeric username if r.Username is empty
-	if r.Username == "" {
-		id, err := accountDB.GetNewNumericLocalpart(req.Context())
-		if err != nil {
-			return httputil.LogThenError(req, err)
-		}
-
-		r.Username = strconv.FormatInt(id, 10)
-	}
-
 	// If no auth type is specified by the client, send back the list of available flows
 	if r.Auth.Type == "" {
 		return util.JSONResponse{
@@ -314,6 +303,16 @@ func Register(
 
 	if resErr = validateCredentials(r.Username, r.Password); resErr != nil {
 		return *resErr
+	}
+
+	// Auto generate a numeric username if r.Username is empty
+	if r.Username == "" {
+		id, err := accountDB.GetNewNumericLocalpart(req.Context())
+		if err != nil {
+			return httputil.LogThenError(req, err)
+		}
+
+		r.Username = strconv.FormatInt(id, 10)
 	}
 
 	// Make sure normal user isn't registering under an exclusive application
@@ -360,7 +359,7 @@ func handleRegistrationFlow(
 		return util.MessageResponse(http.StatusForbidden, "Registration has been disabled")
 	}
 
-	var jsonRes *util.JSONResponse
+	var jsonError *util.JSONResponse
 	switch r.Auth.Type {
 	case authtypes.LoginTypeSharedSecret:
 		// Check shared secret against config
@@ -378,10 +377,10 @@ func handleRegistrationFlow(
 	case authtypes.LoginTypeApplicationService:
 		// Check Application Service register user request is valid.
 		// The application service's ID is returned if so.
-		appserviceID, err := validateApplicationService(cfg, req, r.Username)
+		appserviceID, jsonErr := validateApplicationService(cfg, req, r.Username)
 
-		if err != nil {
-			return *err
+		if jsonError != nil {
+			return *jsonErr
 		}
 
 		// If no error, application service was successfully validated.
@@ -391,8 +390,8 @@ func handleRegistrationFlow(
 			r.Username, "", appserviceID, r.InitialDisplayName)
 
 	default:
-		jsonRes = HandleUserInteractiveFlow(req, r.UserInteractiveFlowRequest, sessionID, cfg, cfg.Derived.Registration)
-		if jsonRes == nil {
+		jsonError = HandleUserInteractiveFlow(req, r.UserInteractiveFlowRequest, sessionID, cfg, cfg.Derived.Registration)
+		if jsonError == nil {
 			return completeRegistration(
 				req.Context(),
 				accountDB,
@@ -403,7 +402,7 @@ func handleRegistrationFlow(
 				r.InitialDisplayName)
 		}
 	}
-	return *jsonRes
+	return *jsonError
 }
 
 // LegacyRegister process register requests from the legacy v1 API
